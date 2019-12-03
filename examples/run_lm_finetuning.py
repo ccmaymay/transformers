@@ -62,8 +62,75 @@ MODEL_CLASSES = {
 }
 
 
+class IdentityTransform(object):
+    def __call__(self, tokens):
+        return tokens
+
+
+class PronounFlipTransform(object):
+    PRONOUN_SETS = [
+        {
+            'subject': ['he'],
+            'object': ['him'],
+            'determiner': ['his'],
+            'possessive': ['his'],
+            'reflexive': ['himself', 'hisself'],
+        },
+        {
+            'subject': ['she'],
+            'object': ['her'],
+            'determiner': ['her'],
+            'possessive': ['hers'],
+            'reflexive': ['herself'],
+        },
+        {
+            'subject': ['they'],
+            'object': ['them'],
+            'determiner': ['their'],
+            'possessive': ['theirs'],
+            'reflexive': ['theirself', 'theirselves'],
+        },
+    ]
+
+    def __init__(self, sample_with_replacement=False):
+        self.sample_with_replacement = sample_with_replacement
+        self.pronoun_map = {}
+        for (i, pronoun_set) in enumerate(self.PRONOUN_SETS):
+            for pronoun_type in ('subject', 'object', 'determiner', 'possessive', 'reflexive'):
+                for pronoun in pronoun_set[pronoun_type]:
+                    if pronoun in self.pronoun_map:
+                        if self.pronoun_map[pronoun]['set'] != i:
+                            raise Exception('pronoun "{}" occurs in more than one set'.format(pronoun))
+                        else:
+                            self.pronoun_map[pronoun]['types'].append(pronoun_type)
+
+                    else:
+                        self.pronoun_map[pronoun] = {
+                            'set': i,
+                            'types': [pronoun_type],
+                        }
+
+    def __call__(self, tokens):
+        set_transform = np.random.choice(range(len(self.PRONOUN_SETS)),
+                                         len(self.PRONOUN_SETS),
+                                         replace=self.sample_with_replacement)
+        return [
+            (
+                random.choice(
+                    self.pronoun_map[set_transform[self.pronoun_map[t]['set']]][
+                        random.choice(self.pronoun_map[t]['types'])])
+                if t in self.pronoun_map
+                else t
+            )
+            for t in tokens
+        ]
+
+
 class TextDataset(Dataset):
-    def __init__(self, tokenizer, file_path='train', block_size=512):
+    def __init__(self, tokenizer, file_path='train', block_size=512, transform=None):
+        if transform is None:
+            transform = IdentityTransform()
+
         assert os.path.isfile(file_path)
         directory, filename = os.path.split(file_path)
         cached_features_file = os.path.join(directory, 'cached_lm_' + str(block_size) + '_' + filename)
@@ -79,7 +146,7 @@ class TextDataset(Dataset):
             with open(file_path, encoding="utf-8") as f:
                 text = f.read()
 
-            tokenized_text = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(text))
+            tokenized_text = tokenizer.convert_tokens_to_ids(transform(tokenizer.tokenize(text)))
 
             for i in range(0, len(tokenized_text)-block_size+1, block_size): # Truncate in block of block_size
                 self.examples.append(tokenizer.build_inputs_with_special_tokens(tokenized_text[i:i+block_size]))
@@ -98,8 +165,11 @@ class TextDataset(Dataset):
         return torch.tensor(self.examples[item])
 
 
-def load_and_cache_examples(args, tokenizer, evaluate=False):
-    dataset = TextDataset(tokenizer, file_path=args.eval_data_file if evaluate else args.train_data_file, block_size=args.block_size)
+def load_and_cache_examples(args, tokenizer, evaluate=False, transform=None):
+    dataset = TextDataset(tokenizer,
+                          file_path=args.eval_data_file if evaluate else args.train_data_file,
+                          block_size=args.block_size,
+                          transform=transform)
     return dataset
 
 
@@ -423,6 +493,8 @@ def main():
                         help="For distributed training: local_rank")
     parser.add_argument('--server_ip', type=str, default='', help="For distant debugging.")
     parser.add_argument('--server_port', type=str, default='', help="For distant debugging.")
+    parser.add_argument('--pronoun_flip_transform', action='store_true', help='Transform data by flipping pronouns')
+    parser.add_argument('--pronoun_flip_replace', action='store_true', help='Sample pronoun sets with replacement (allow more ambiguity)')
     args = parser.parse_args()
 
     if args.model_type in ["bert", "roberta", "distilbert"] and not args.mlm:
@@ -477,6 +549,11 @@ def main():
     model = model_class.from_pretrained(args.model_name_or_path, from_tf=bool('.ckpt' in args.model_name_or_path), config=config)
     model.to(args.device)
 
+    if args.pronoun_flip_transform:
+        transform = PronounFlipTransform(args.pronoun_flip_replace)
+    else:
+        transform = None
+
     if args.local_rank == 0:
         torch.distributed.barrier()  # End of barrier to make sure only the first process in distributed training download model & vocab
 
@@ -487,7 +564,7 @@ def main():
         if args.local_rank not in [-1, 0]:
             torch.distributed.barrier()  # Barrier to make sure only the first process in distributed training process the dataset, and the others will use the cache
 
-        train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
+        train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False, transform=transform)
 
         if args.local_rank == 0:
             torch.distributed.barrier()
