@@ -421,16 +421,17 @@ def train(args, model, tokenizer):
             train_iterator.close()
             break
 
-        logger.info("Recreating data set")
-        if args.local_rank not in [-1, 0]:
-            torch.distributed.barrier()  # Barrier to make sure only the first process in distributed training process the dataset, and the others will use the cache
-        train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False, transform=transform,
-                                                load_cache=(args.local_rank not in [-1, 0]),
-                                                save_cache=(args.local_rank in [-1, 0]))
-        if args.local_rank == 0:
-            torch.distributed.barrier()
-        train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-        train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+        if args.pronoun_flip_each_epoch:
+            logger.info("Regenerating data set")
+            if args.local_rank not in [-1, 0]:
+                torch.distributed.barrier()  # Barrier to make sure only the first process in distributed training process the dataset, and the others will use the cache
+            train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False, transform=transform,
+                                                    load_cache=(args.local_rank not in [-1, 0]),
+                                                    save_cache=(args.local_rank in [-1, 0]))
+            if args.local_rank == 0:
+                torch.distributed.barrier()
+            train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
+            train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
     if args.local_rank in [-1, 0]:
         tb_writer.close()
@@ -575,8 +576,12 @@ def main():
                         help="For distributed training: local_rank")
     parser.add_argument('--server_ip', type=str, default='', help="For distant debugging.")
     parser.add_argument('--server_port', type=str, default='', help="For distant debugging.")
-    parser.add_argument('--pronoun_flip_transform', action='store_true', help='Transform data by flipping pronouns')
-    parser.add_argument('--pronoun_flip_replace', action='store_true', help='Sample pronoun sets with replacement (allow more ambiguity)')
+    parser.add_argument('--pronoun_flip_transform', action='store_true',
+                        help='Transform data by flipping pronouns')
+    parser.add_argument('--pronoun_flip_replace', action='store_true',
+                        help='Sample pronoun sets with replacement (allow more ambiguity)')
+    parser.add_argument('--pronoun_flip_each_epoch', action='store_true',
+                        help='Resample pronoun sets each epoch')
     args = parser.parse_args()
 
     if args.model_type in ["bert", "roberta", "distilbert"] and not args.mlm:
