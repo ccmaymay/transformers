@@ -29,6 +29,7 @@ import pickle
 import random
 import re
 import shutil
+import collections
 
 import numpy as np
 import torch
@@ -67,59 +68,80 @@ class IdentityTransform(object):
         return tokens
 
 
+Pronoun = collections.namedtuple('Pronoun', ('set', 'types'))
+
+
 class PronounFlipTransform(object):
     PRONOUN_SETS = [
         {
             'subject': ['he'],
             'object': ['him'],
-            'determiner': ['his'],
+            'possessive-adjective': ['his'],
             'possessive': ['his'],
             'reflexive': ['himself', 'hisself'],
         },
         {
             'subject': ['she'],
             'object': ['her'],
-            'determiner': ['her'],
+            'possessive-adjective': ['her'],
             'possessive': ['hers'],
             'reflexive': ['herself'],
         },
         {
             'subject': ['they'],
             'object': ['them'],
-            'determiner': ['their'],
+            'possessive-adjective': ['their'],
             'possessive': ['theirs'],
             'reflexive': ['theirself', 'theirselves'],
         },
     ]
 
     def __init__(self, sample_with_replacement=False):
+        types = None
+        for pronoun_set in self.PRONOUN_SETS:
+            if types is None:
+                types = set(pronoun_set.keys())
+            else:
+                if types != set(pronoun_set.keys()):
+                    raise Exception('pronoun sets have differing types')
+
         self.sample_with_replacement = sample_with_replacement
-        self.pronoun_map = {}
+
+        self.pronouns = {}
         for (i, pronoun_set) in enumerate(self.PRONOUN_SETS):
-            for pronoun_type in ('subject', 'object', 'determiner', 'possessive', 'reflexive'):
-                for pronoun in pronoun_set[pronoun_type]:
-                    if pronoun in self.pronoun_map:
-                        if self.pronoun_map[pronoun]['set'] != i:
-                            raise Exception('pronoun "{}" occurs in more than one set'.format(pronoun))
+            for (pronoun_type, pronoun_strs) in pronoun_set.items():
+                for pronoun_str in pronoun_strs:
+                    if pronoun_str in self.pronouns:
+                        if self.pronouns[pronoun_str].set != i:
+                            raise Exception('pronoun "{}" occurs in more than one set'.format(pronoun_str))
                         else:
-                            self.pronoun_map[pronoun]['types'].append(pronoun_type)
+                            self.pronouns[pronoun_str].types.append(pronoun_type)
 
                     else:
-                        self.pronoun_map[pronoun] = {
-                            'set': i,
-                            'types': [pronoun_type],
-                        }
+                        self.pronouns[pronoun_str] = Pronoun(set=i, types=[pronoun_type])
 
     def __call__(self, tokens):
+        # First, generate the map from old pronoun set to new pronoun set
         set_transform = np.random.choice(range(len(self.PRONOUN_SETS)),
                                          len(self.PRONOUN_SETS),
                                          replace=self.sample_with_replacement)
+
+        # Next, compute a map from old pronoun to new pronoun possibilities,
+        # encoded as a list of lists in which the outer list corresponds to
+        # possible types of the old pronoun and the inner list corresponds
+        # to possible forms of the new pronoun type
+        pronoun_transform = dict(
+            (s, [self.PRONOUN_SETS[set_transform[pronoun.set]][t] for t in pronoun.types])
+            for (s, pronoun)
+            in self.pronouns.items()
+        )
+
+        # Finally, flip pronouns in the tokens, randomly choosing the type of
+        # the old pronoun and the form of the new one
         return [
             (
-                random.choice(
-                    self.pronoun_map[set_transform[self.pronoun_map[t]['set']]][
-                        random.choice(self.pronoun_map[t]['types'])])
-                if t in self.pronoun_map
+                random.choice(random.choice(pronoun_transform(t)))
+                if t in pronoun_transform
                 else t
             )
             for t in tokens
