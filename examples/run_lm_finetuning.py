@@ -120,7 +120,14 @@ class PronounFlipTransform(object):
                     else:
                         self.pronouns[pronoun_str] = Pronoun(set=i, types=[pronoun_type])
 
-    def __call__(self, tokens):
+    def __call__(self, tokens, batch_size=None):
+        return [
+            token
+            for batch_tokens in self.batch(tokens, batch_size=batch_size)
+            for token in self._transform(batch_tokens)
+        ]
+
+    def _transform(self, tokens):
         # First, generate the map from old pronoun set to new pronoun set
         set_transform = np.random.choice(range(len(self.PRONOUN_SETS)),
                                          len(self.PRONOUN_SETS),
@@ -140,12 +147,31 @@ class PronounFlipTransform(object):
         # the old pronoun and the form of the new one
         return [
             (
-                random.choice(random.choice(pronoun_transform(t)))
-                if t in pronoun_transform
+                self.unnormalize(t, random.choice(random.choice(pronoun_transform[t.lower()])))
+                if t.lower() in pronoun_transform
                 else t
             )
             for t in tokens
         ]
+
+    @classmethod
+    def batch(cls, items, batch_size=None):
+        if batch_size is None:
+            yield items
+        else:
+            for i in range(0, len(items), batch_size):
+                yield items[i:(i + batch_size)]
+
+    @classmethod
+    def unnormalize(cls, orig_s, s):
+        if orig_s.istitle():
+            return s.title()
+        elif orig_s.isupper():
+            return s.upper()
+        elif orig_s.islower():
+            return s.lower()
+        else:
+            return s
 
 
 class TextDataset(Dataset):
@@ -168,10 +194,13 @@ class TextDataset(Dataset):
             with open(file_path, encoding="utf-8") as f:
                 text = f.read()
 
-            tokenized_text = tokenizer.convert_tokens_to_ids(transform(tokenizer.tokenize(text)))
+            tokenized_text = tokenizer.tokenize(text)
 
             for i in range(0, len(tokenized_text)-block_size+1, block_size): # Truncate in block of block_size
-                self.examples.append(tokenizer.build_inputs_with_special_tokens(tokenized_text[i:i+block_size]))
+                self.examples.append(
+                    tokenizer.build_inputs_with_special_tokens(
+                        tokenizer.convert_tokens_to_ids(
+                            transform(tokenized_text[i:i+block_size]))))
             # Note that we are loosing the last truncated example here for the sake of simplicity (no padding)
             # If your dataset is small, first you should loook for a bigger one :-) and second you
             # can change this behavior by adding (model specific) padding.
