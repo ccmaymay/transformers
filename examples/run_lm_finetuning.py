@@ -175,7 +175,7 @@ class PronounFlipTransform(object):
 
 
 class TextDataset(Dataset):
-    def __init__(self, tokenizer, file_path='train', block_size=512, transform=None):
+    def __init__(self, tokenizer, file_path='train', block_size=512, transform=None, cache=True):
         if transform is None:
             transform = IdentityTransform()
 
@@ -183,7 +183,7 @@ class TextDataset(Dataset):
         directory, filename = os.path.split(file_path)
         cached_features_file = os.path.join(directory, 'cached_lm_' + str(block_size) + '_' + filename)
 
-        if os.path.exists(cached_features_file):
+        if cache and os.path.exists(cached_features_file):
             logger.info("Loading features from cached file %s", cached_features_file)
             with open(cached_features_file, 'rb') as handle:
                 self.examples = pickle.load(handle)
@@ -205,9 +205,10 @@ class TextDataset(Dataset):
             # If your dataset is small, first you should loook for a bigger one :-) and second you
             # can change this behavior by adding (model specific) padding.
 
-            logger.info("Saving features into cached file %s", cached_features_file)
-            with open(cached_features_file, 'wb') as handle:
-                pickle.dump(self.examples, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            if cache:
+                logger.info("Saving features into cached file %s", cached_features_file)
+                with open(cached_features_file, 'wb') as handle:
+                    pickle.dump(self.examples, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     def __len__(self):
         return len(self.examples)
@@ -220,7 +221,8 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, transform=None):
     dataset = TextDataset(tokenizer,
                           file_path=args.eval_data_file if evaluate else args.train_data_file,
                           block_size=args.block_size,
-                          transform=transform)
+                          transform=transform,
+                          cache=evaluate)
     return dataset
 
 
@@ -284,12 +286,18 @@ def mask_tokens(inputs, tokenizer, args):
     return inputs, labels
 
 
-def train(args, train_dataset, model, tokenizer):
+def train(args, model, tokenizer):
     """ Train the model """
     if args.local_rank in [-1, 0]:
         tb_writer = SummaryWriter()
 
+    if args.pronoun_flip_transform:
+        transform = PronounFlipTransform(args.pronoun_flip_replace)
+    else:
+        transform = None
+
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
+    train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False, transform=transform)
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
@@ -400,6 +408,11 @@ def train(args, train_dataset, model, tokenizer):
         if args.max_steps > 0 and global_step > args.max_steps:
             train_iterator.close()
             break
+
+        logger.info("Recreating data set")
+        train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False, transform=transform)
+        train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
+        train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
     if args.local_rank in [-1, 0]:
         tb_writer.close()
@@ -600,11 +613,6 @@ def main():
     model = model_class.from_pretrained(args.model_name_or_path, from_tf=bool('.ckpt' in args.model_name_or_path), config=config)
     model.to(args.device)
 
-    if args.pronoun_flip_transform:
-        transform = PronounFlipTransform(args.pronoun_flip_replace)
-    else:
-        transform = None
-
     if args.local_rank == 0:
         torch.distributed.barrier()  # End of barrier to make sure only the first process in distributed training download model & vocab
 
@@ -615,12 +623,10 @@ def main():
         if args.local_rank not in [-1, 0]:
             torch.distributed.barrier()  # Barrier to make sure only the first process in distributed training process the dataset, and the others will use the cache
 
-        train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False, transform=transform)
-
         if args.local_rank == 0:
             torch.distributed.barrier()
 
-        global_step, tr_loss = train(args, train_dataset, model, tokenizer)
+        global_step, tr_loss = train(args, model, tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
 
