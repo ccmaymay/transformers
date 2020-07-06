@@ -68,11 +68,11 @@ class IdentityTransform(object):
         return tokens
 
 
-Pronoun = collections.namedtuple('Pronoun', ('set', 'types'))
+Pronoun = collections.namedtuple('Pronoun', ('index', 'types'))
 
 
 class PronounFlipTransform(object):
-    PRONOUN_SETS = [
+    PRONOUN_TYPE_WORD_MAPS = [
         {
             'subject': ['he'],
             'object': ['him'],
@@ -97,30 +97,28 @@ class PronounFlipTransform(object):
     ]
 
     def __init__(self, sample_with_replacement=False):
-        types = None
-        for pronoun_set in self.PRONOUN_SETS:
-            if types is None:
-                types = set(pronoun_set.keys())
-            else:
-                if types != set(pronoun_set.keys()):
-                    raise Exception('pronoun sets have differing types')
+        if len(set(tuple(sorted(s.keys())) for s in self.PRONOUN_TYPE_WORD_MAPS)) != 1:
+            raise Exception('pronoun maps have differing types')
 
         self.sample_with_replacement = sample_with_replacement
 
+        # Generate map from pronoun words (strings) to Pronoun objects
         self.pronouns = {}
-        for (i, pronoun_set) in enumerate(self.PRONOUN_SETS):
-            for (pronoun_type, pronoun_strs) in pronoun_set.items():
+        for (i, pronoun_map) in enumerate(self.PRONOUN_TYPE_WORD_MAPS):
+            for (pronoun_type, pronoun_strs) in pronoun_map.items():
                 for pronoun_str in pronoun_strs:
                     if pronoun_str in self.pronouns:
-                        if self.pronouns[pronoun_str].set != i:
-                            raise Exception('pronoun "{}" occurs in more than one set'.format(pronoun_str))
+                        if self.pronouns[pronoun_str].index != i:
+                            raise Exception('pronoun "{}" occurs in more than one map'.format(pronoun_str))
                         else:
                             self.pronouns[pronoun_str].types.append(pronoun_type)
 
                     else:
-                        self.pronouns[pronoun_str] = Pronoun(set=i, types=[pronoun_type])
+                        self.pronouns[pronoun_str] = Pronoun(index=i, types=[pronoun_type])
 
     def __call__(self, tokens, batch_size=None):
+        # For now batch_size is unused, so we're just mapping tokens by
+        # self._transform
         return [
             token
             for batch_tokens in self.batch(tokens, batch_size=batch_size)
@@ -128,9 +126,9 @@ class PronounFlipTransform(object):
         ]
 
     def _transform(self, tokens):
-        # First, generate the map from old pronoun set to new pronoun set
-        set_transform = np.random.choice(range(len(self.PRONOUN_SETS)),
-                                         len(self.PRONOUN_SETS),
+        # First, generate the map from old pronoun map to new pronoun map
+        map_transform = np.random.choice(range(len(self.PRONOUN_TYPE_WORD_MAPS)),
+                                         len(self.PRONOUN_TYPE_WORD_MAPS),
                                          replace=self.sample_with_replacement)
 
         # Next, compute a map from old pronoun to new pronoun possibilities,
@@ -138,8 +136,14 @@ class PronounFlipTransform(object):
         # possible types of the old pronoun and the inner list corresponds
         # to possible forms of the new pronoun type
         pronoun_transform = dict(
-            (s, [self.PRONOUN_SETS[set_transform[pronoun.set]][t] for t in pronoun.types])
-            for (s, pronoun)
+            (
+                pronoun_str,
+                [
+                    self.PRONOUN_TYPE_WORD_MAPS[map_transform[pronoun.index]][t]
+                    for t in pronoun.types
+                ]
+            )
+            for (pronoun_str, pronoun)
             in self.pronouns.items()
         )
 
@@ -147,11 +151,13 @@ class PronounFlipTransform(object):
         # the old pronoun and the form of the new one
         return [
             (
-                self.unnormalize(t, random.choice(random.choice(pronoun_transform[t.lower()])))
-                if t.lower() in pronoun_transform
-                else t
+                self.unnormalize(
+                    token,
+                    random.choice(random.choice(pronoun_transform[token.lower()])))
+                if token.lower() in pronoun_transform
+                else token
             )
-            for t in tokens
+            for token in tokens
         ]
 
     @classmethod
